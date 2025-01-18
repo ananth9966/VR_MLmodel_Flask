@@ -46,7 +46,6 @@ input_features = [
     "AngularJerkMagnitude"
 ]
 
-
 @app.route('/headtracking', methods=['POST'])
 def receive_headtracking_data():
     global data_log, prediction_log
@@ -56,40 +55,53 @@ def receive_headtracking_data():
     if not data:
         return jsonify({"status": "error", "message": "No data received"}), 400
 
-    # Extract relevant features and append to the data log
+    if not isinstance(data, list):
+        return jsonify({"status": "error", "message": "Expected a batch of JSON objects"}), 400
+
+    feature_batch = []
+    indices = []  # To keep track of original indices for predictions
+
+    # Extract feature values for each entry and log data
+    for idx, entry in enumerate(data):
+        try:
+            feature_values = [entry[feature] for feature in input_features]
+            feature_batch.append(feature_values)
+            data_entry = {"timestamp": datetime.now(), "data": feature_values}
+            data_log.append(data_entry)
+            indices.append(idx)
+        except KeyError as e:
+            return jsonify({"status": "error", "message": f"Missing feature {e} in entry {idx}"}), 400
+
+    # Convert the batch of features into a NumPy array
+    raw_input_data = np.array(feature_batch, dtype=np.float32)
+
     try:
-        # Extract feature values in the correct order
-        feature_values = [data[feature] for feature in input_features]
-        data_entry = {"timestamp": datetime.now(), "data": feature_values}
-        data_log.append(data_entry)
-
-        # Prepare input for the scaler
-        raw_input_data = np.array(feature_values, dtype=np.float32).reshape(1, -1)
-
-        # Scale the input using the Scaler ONNX model
+        # Scale the entire batch using the Scaler ONNX model
         scaler_inputs = {scaler_session.get_inputs()[0].name: raw_input_data}
         scaled_data = scaler_session.run(None, scaler_inputs)[0]
 
-        # Prepare input for prediction model
+        # Run the prediction on the entire scaled batch
         model_inputs = {model_session.get_inputs()[0].name: scaled_data}
         output = model_session.run(None, model_inputs)
-        prediction = float(output[0][0])  # Convert ndarray to a Python float
 
-        # Append the prediction to the rolling log
+        # Assuming the model outputs an array of shape (batch_size, 1) or (batch_size,)
+        predictions_array = output[0]
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Error during batch prediction: {e}"}), 500
+
+    batch_predictions = []
+    # Process each prediction and log it
+    for i, pred in enumerate(predictions_array):
+        # If prediction comes as an array with one element, extract that element
+        prediction_value = float(pred[0]) if isinstance(pred, (list, np.ndarray)) and np.size(pred) == 1 else float(pred)
         prediction_entry = {
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "prediction": prediction
+            "prediction": prediction_value
         }
         prediction_log.append(prediction_entry)
+        batch_predictions.append({"index": indices[i], "prediction": prediction_value})
 
-        print(f"Prediction for Input: {prediction}")
-        return jsonify({"status": "success", "prediction": prediction}), 200
-    except KeyError as e:
-        print(f"Missing feature in received data: {e}")
-        return jsonify({"status": "error", "message": f"Missing feature {e}"}), 400
-    except Exception as e:
-        print(f"Error during prediction: {e}")
-        return jsonify({"status": "error", "message": "Prediction failed"}), 500
+    return jsonify({"status": "success", "predictions": batch_predictions}), 200
 
 @app.route('/display')
 def display_data():
