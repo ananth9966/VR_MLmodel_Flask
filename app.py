@@ -55,53 +55,44 @@ def receive_headtracking_data():
     if not data:
         return jsonify({"status": "error", "message": "No data received"}), 400
 
-    if not isinstance(data, list):
-        return jsonify({"status": "error", "message": "Expected a batch of JSON objects"}), 400
+    # Ensure the data is a list of lists
+    if not isinstance(data, list) or not all(isinstance(entry, list) for entry in data):
+        return jsonify({"status": "error", "message": "Expected a batch of lists"}), 400
 
-    feature_batch = []
-    indices = []  # To keep track of original indices for predictions
-
-    # Extract feature values for each entry and log data
-    for idx, entry in enumerate(data):
-        try:
-            feature_values = [entry[feature] for feature in input_features]
-            feature_batch.append(feature_values)
-            data_entry = {"timestamp": datetime.now(), "data": feature_values}
-            data_log.append(data_entry)
-            indices.append(idx)
-        except KeyError as e:
-            return jsonify({"status": "error", "message": f"Missing feature {e} in entry {idx}"}), 400
-
-    # Convert the batch of features into a NumPy array
-    raw_input_data = np.array(feature_batch, dtype=np.float32)
+    # Check if all entries have the correct number of features
+    if any(len(entry) != len(input_features) for entry in data):
+        return jsonify({"status": "error", "message": "One or more entries have an incorrect number of features"}), 400
 
     try:
-        # Scale the entire batch using the Scaler ONNX model
-        scaler_inputs = {scaler_session.get_inputs()[0].name: raw_input_data}
+        # Combine the data into a single sample by averaging the rows
+        combined_data = np.mean(np.array(data, dtype=np.float32), axis=0)
+
+        # Check the combined data shape matches the expected input features
+        if combined_data.shape[0] != len(input_features):
+            return jsonify({"status": "error", "message": "Combined data has incorrect feature dimensions"}), 400
+
+        # Prepare data for the scaler
+        scaler_inputs = {scaler_session.get_inputs()[0].name: combined_data.reshape(1, -1)}
         scaled_data = scaler_session.run(None, scaler_inputs)[0]
 
-        # Run the prediction on the entire scaled batch
+        # Run the prediction on the scaled data
         model_inputs = {model_session.get_inputs()[0].name: scaled_data}
-        output = model_session.run(None, model_inputs)
+        prediction = model_session.run(None, model_inputs)[0]
 
-        # Assuming the model outputs an array of shape (batch_size, 1) or (batch_size,)
-        predictions_array = output[0]
+        # Assuming the model outputs a single value
+        prediction_value = float(prediction[0]) if isinstance(prediction, (list, np.ndarray)) and np.size(prediction) == 1 else float(prediction)
+
+        # Log the combined data and prediction
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        data_log.append({"timestamp": timestamp, "data": combined_data.tolist()})
+        prediction_log.append({"timestamp": timestamp, "prediction": prediction_value})
+
+        # Return the single prediction
+        return jsonify({"status": "success", "prediction": prediction_value}), 200
+
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Error during batch prediction: {e}"}), 500
+        return jsonify({"status": "error", "message": f"Error during batch processing: {e}"}), 500
 
-    batch_predictions = []
-    # Process each prediction and log it
-    for i, pred in enumerate(predictions_array):
-        # If prediction comes as an array with one element, extract that element
-        prediction_value = float(pred[0]) if isinstance(pred, (list, np.ndarray)) and np.size(pred) == 1 else float(pred)
-        prediction_entry = {
-            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            "prediction": prediction_value
-        }
-        prediction_log.append(prediction_entry)
-        batch_predictions.append({"index": indices[i], "prediction": prediction_value})
-
-    return jsonify({"status": "success", "predictions": batch_predictions}), 200
 
 @app.route('/display')
 def display_data():
