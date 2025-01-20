@@ -13,9 +13,9 @@ model_path = 'random_forest_regressor.onnx'
 try:
     scaler_session = ort.InferenceSession(scaler_path)
     print("Scaler model loaded successfully.")
-    for input in scaler_session.get_inputs():
-        print(f"Scaler Input Name: {input.name}")
-        print(f"Scaler Input Shape: {input.shape}")
+    for input_meta in scaler_session.get_inputs():
+        print(f"Scaler Input Name: {input_meta.name}")
+        print(f"Scaler Input Shape: {input_meta.shape}")
 except Exception as e:
     print("Error loading scaler model:", e)
 
@@ -23,9 +23,9 @@ except Exception as e:
 try:
     model_session = ort.InferenceSession(model_path)
     print("Prediction model loaded successfully.")
-    for input in model_session.get_inputs():
-        print(f"Model Input Name: {input.name}")
-        print(f"Model Input Shape: {input.shape}")
+    for input_meta in model_session.get_inputs():
+        print(f"Model Input Name: {input_meta.name}")
+        print(f"Model Input Shape: {input_meta.shape}")
 except Exception as e:
     print("Error loading prediction model:", e)
 
@@ -59,39 +59,43 @@ def receive_headtracking_data():
     if not isinstance(data, list) or not all(isinstance(entry, list) for entry in data):
         return jsonify({"status": "error", "message": "Expected a batch of lists"}), 400
 
-    # Check if all entries have the correct number of features
-    if any(len(entry) != len(input_features) for entry in data):
-        return jsonify({"status": "error", "message": "One or more entries have an incorrect number of features"}), 400
+    # Convert incoming data to a NumPy array
+    try:
+        data_array = np.array(data, dtype=np.float32)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Data conversion error: {e}"}), 400
+
+    # Validate feature dimensions
+    if data_array.ndim != 2 or data_array.shape[1] != len(input_features):
+        return jsonify({"status": "error", 
+                        "message": "Each entry must have the correct number of features"}), 400
 
     try:
-        # Combine the data into a single sample by averaging the rows
-        combined_data = np.mean(np.array(data, dtype=np.float32), axis=0)
-
-        # Check the combined data shape matches the expected input features
-        if combined_data.shape[0] != len(input_features):
-            return jsonify({"status": "error", "message": "Combined data has incorrect feature dimensions"}), 400
-
-        # Prepare data for the scaler
-        scaler_inputs = {scaler_session.get_inputs()[0].name: combined_data.reshape(1, -1)}
+        # Scale the entire batch of rows
+        scaler_inputs = {scaler_session.get_inputs()[0].name: data_array}
         scaled_data = scaler_session.run(None, scaler_inputs)[0]
 
-        # Run the prediction on the scaled data
+        # Run predictions on the scaled batch
         model_inputs = {model_session.get_inputs()[0].name: scaled_data}
-        prediction = model_session.run(None, model_inputs)[0]
+        predictions = model_session.run(None, model_inputs)[0]
 
-        # Assuming the model outputs a single value
-        prediction_value = float(prediction[0]) if isinstance(prediction, (list, np.ndarray)) and np.size(prediction) == 1 else float(prediction)
+        # Compute the average prediction across all rows
+        prediction_value = float(np.mean(predictions))
 
-        # Log the combined data and prediction
+        # Log each individual row with a timestamp
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        data_log.append({"timestamp": timestamp, "data": combined_data.tolist()})
+        for row in data_array:
+            data_log.append({"timestamp": timestamp, "data": row.tolist()})
+        
+        # Log the aggregated prediction with timestamp
         prediction_log.append({"timestamp": timestamp, "prediction": prediction_value})
 
-        # Return the single prediction
+        # Return the aggregated prediction
         return jsonify({"status": "success", "prediction": prediction_value}), 200
 
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Error during batch processing: {e}"}), 500
+        return jsonify({"status": "error", 
+                        "message": f"Error during batch processing: {e}"}), 500
 
 
 @app.route('/display')
